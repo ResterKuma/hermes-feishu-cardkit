@@ -41,14 +41,16 @@ except ImportError:
     LARK_AVAILABLE = False
     lark = None
 
-# 可选锁依赖 — 默认无锁，Hermes 通过注入 acquire_scoped_lock / release_scoped_lock 启用
+# 兼容 Hermes gateway.status 锁，独立使用时自动降级为 no-op
 try:
     from gateway.status import acquire_scoped_lock, release_scoped_lock
 except ImportError:
-    async def acquire_scoped_lock(key: str, timeout: float = 5.0) -> bool:
-        return True
-    async def release_scoped_lock(key: str) -> None:
-        pass
+    def acquire_scoped_lock(name: str, timeout: float = 5.0):
+        class _DummyLock:
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+        return _DummyLock()
+    def release_scoped_lock(name: str): pass
 
 logger = logging.getLogger(__name__)
 
