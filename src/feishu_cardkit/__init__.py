@@ -30,6 +30,11 @@ from .components import (
     overflow_menu,
 )
 from .api import CardKitAPI
+from .hermes_controller import (
+    StreamingCardController as HermesStreamingCardController,
+    create_streaming_card as hermes_create_streaming_card,
+    send_progress_card as hermes_send_progress_card,
+)
 
 __version__ = "0.1.0"
 __all__ = [
