@@ -187,4 +187,4 @@ pytest
 
 ## 📄 License
 
-MIT License © 2026 ResterKuma (YuZiXuan)
+MIT License © 2026 ResterKuma
