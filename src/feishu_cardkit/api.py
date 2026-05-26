@@ -30,6 +30,12 @@ try:
         CreateCardRequestBody,
         ContentCardElementRequest,
         ContentCardElementRequestBody,
+        CreateCardElementRequest,
+        CreateCardElementRequestBody,
+        DeleteCardElementRequest,
+        DeleteCardElementRequestBody,
+        UpdateCardElementRequest,
+        UpdateCardElementRequestBody,
         PatchCardElementRequest,
         PatchCardElementRequestBody,
         UpdateCardRequest,
@@ -378,5 +384,158 @@ class CardKitAPI:
             logger.warning("设置流式模式超时 (10s)")
         except Exception as e:
             logger.error("设置流式模式异常: %s", e)
+
+        return False
+
+    # ── 组件级 CRUD ─────────────────────────────────────────
+
+    async def create_element(
+        self,
+        card_id: str,
+        element: Dict[str, Any],
+        *,
+        after_element_id: Optional[str] = None,
+        sequence: int,
+    ) -> bool:
+        """在卡片中添加新组件。
+
+        Args:
+            card_id: 卡片实体 ID。
+            element: 新组件 JSON 字典。
+            after_element_id: 插入到哪个元素之后（None=末尾 append）。
+            sequence: 序列号。
+        """
+        try:
+            insert_type = "insert_after" if after_element_id else "append"
+            builder = (
+                CreateCardElementRequestBody.builder()
+                .type(insert_type)
+                .elements(json.dumps([element]))
+                .sequence(sequence)
+            )
+            if after_element_id:
+                builder.target_element_id(after_element_id)
+
+            request = (
+                CreateCardElementRequest.builder()
+                .card_id(card_id)
+                .request_body(builder.build())
+                .build()
+            )
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.client.cardkit.v1.card_element.create, request
+                ),
+                timeout=10.0,
+            )
+
+            if response.code == 0:
+                logger.info("添加组件成功")
+                return True
+            else:
+                logger.warning(
+                    "添加组件失败: code=%s, msg=%s", response.code, response.msg
+                )
+        except asyncio.TimeoutError:
+            logger.warning("添加组件超时 (10s)")
+        except Exception as e:
+            logger.error("添加组件异常: %s", e)
+
+        return False
+
+    async def delete_element(
+        self,
+        card_id: str,
+        element_id: str,
+        *,
+        sequence: int,
+    ) -> bool:
+        """删除卡片中的指定组件。
+
+        Args:
+            card_id: 卡片实体 ID。
+            element_id: 要删除的元素 ID。
+            sequence: 序列号。
+        """
+        try:
+            request = (
+                DeleteCardElementRequest.builder()
+                .card_id(card_id)
+                .element_id(element_id)
+                .request_body(
+                    DeleteCardElementRequestBody.builder()
+                    .sequence(sequence)
+                    .build()
+                )
+                .build()
+            )
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.client.cardkit.v1.card_element.delete, request
+                ),
+                timeout=10.0,
+            )
+
+            if response.code == 0:
+                logger.info("删除组件成功: %s", element_id)
+                return True
+            else:
+                logger.warning(
+                    "删除组件失败: code=%s, msg=%s", response.code, response.msg
+                )
+        except asyncio.TimeoutError:
+            logger.warning("删除组件超时 (10s)")
+        except Exception as e:
+            logger.error("删除组件异常: %s", e)
+
+        return False
+
+    async def update_element(
+        self,
+        card_id: str,
+        element_id: str,
+        element: Dict[str, Any],
+        *,
+        sequence: int,
+    ) -> bool:
+        """完整更新卡片中的指定组件（比 patch 更彻底）。
+
+        Args:
+            card_id: 卡片实体 ID。
+            element_id: 要更新的元素 ID。
+            element: 新的完整元素 JSON。
+            sequence: 序列号。
+        """
+        try:
+            request = (
+                UpdateCardElementRequest.builder()
+                .card_id(card_id)
+                .element_id(element_id)
+                .request_body(
+                    UpdateCardElementRequestBody.builder()
+                    .element(json.dumps(element))
+                    .sequence(sequence)
+                    .build()
+                )
+                .build()
+            )
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.client.cardkit.v1.card_element.update, request
+                ),
+                timeout=10.0,
+            )
+
+            if response.code == 0:
+                logger.info("更新组件成功: %s", element_id)
+                return True
+            else:
+                logger.warning(
+                    "更新组件失败: code=%s, msg=%s", response.code, response.msg
+                )
+        except asyncio.TimeoutError:
+            logger.warning("更新组件超时 (10s)")
+        except Exception as e:
+            logger.error("更新组件异常: %s", e)
 
         return False
