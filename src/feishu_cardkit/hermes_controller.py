@@ -977,6 +977,7 @@ class StreamingCardController:
             "flex_mode": "none",
             "background_style": "grey",
             "horizontal_spacing": "default",
+            "vertical_spacing": "2px",
             "element_id": f"th{id(headers) % 10000}",
             "columns": header_cols
         })
@@ -993,7 +994,7 @@ class StreamingCardController:
                     "vertical_align": "top",
                     "elements": [{
                         "tag": "markdown",
-                        "content": ("\u200b\n" + cell_val) if cell_val else " \n\u200b",
+                        "content": cell_val if cell_val else " ",
                         "text_size": "notation"
                     }]
                 })
@@ -1002,7 +1003,8 @@ class StreamingCardController:
                 "tag": "column_set",
                 "flex_mode": "none",
                 "background_style": "default",
-            "horizontal_spacing": "default",
+                "horizontal_spacing": "default",
+                "vertical_spacing": "2px",
             "element_id": f"tr{id(headers) % 10000}_{ri}",
                 "columns": data_cols
             })
