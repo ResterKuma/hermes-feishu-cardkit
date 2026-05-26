@@ -102,6 +102,7 @@ def _build_column_set_table(
         "flex_mode": "none",
         "background_style": "grey",
         "horizontal_spacing": "default",
+        "vertical_spacing": "2px",
         "columns": header_cols,
     })
 
@@ -117,7 +118,7 @@ def _build_column_set_table(
                 "vertical_align": "top",
                 "elements": [{
                     "tag": "markdown",
-                    "content": ("\u200b\n" + cell_val) if cell_val else " \n\u200b",
+                    "content": cell_val if cell_val else " ",
                     "text_size": "notation",
                 }],
             })
@@ -126,6 +127,7 @@ def _build_column_set_table(
             "flex_mode": "none",
             "background_style": "default",
             "horizontal_spacing": "default",
+            "vertical_spacing": "2px",
             "columns": data_cols,
         })
 
