@@ -130,4 +130,18 @@ pytest
 
 ## 📄 License
 
-MIT License © 2026 Rester (YuZiXuan)
+MIT License © 2026 ResterKuma (YuZiXuan)
+
+---
+
+## ✨ 特别赞助
+
+<div align="center">
+
+[![DreamSeed 种梦计划 — AI创造者大赛](docs/sponsor-dreamseed.jpg)](https://github.com/ResterKuma/hermes-feishu-cardkit)
+
+**[DreamSeed 种梦计划](https://github.com/ResterKuma/hermes-feishu-cardkit) — AI创造者大赛**
+
+🏆 现金奖励 50万元 | ⚡ 最高6折算力折扣 | DreamField 主办
+
+</div>
