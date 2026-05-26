@@ -355,7 +355,7 @@ class CardKitAPI:
                 .card_id(card_id)
                 .request_body(
                     SettingsCardRequestBody.builder()
-                    .streaming_status("streaming" if enabled else "finished")
+                    .settings(json.dumps({"streaming_mode": enabled}))
                     .sequence(sequence)
                     .build()
                 )
