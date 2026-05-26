@@ -118,8 +118,8 @@ feishu-cardkit/
 
 ```bash
 # 克隆项目
-git clone https://github.com/ResterJ/feishu-cardkit.git
-cd feishu-cardkit
+git clone https://github.com/ResterKuma/hermes-feishu-cardkit.git
+cd hermes-feishu-cardkit
 
 # 安装开发依赖
 pip install -e ".[dev]"
