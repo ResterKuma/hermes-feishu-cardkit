@@ -1,10 +1,10 @@
-<div align="center">
-
-[![DreamSeed 种梦计划 — AI创造者大赛](docs/sponsor-dreamseed.jpg)](https://github.com/ResterKuma/hermes-feishu-cardkit)
-
-**DreamSeed 种梦计划 — AI创造者大赛** 🏆 现金奖励 50万元 | ⚡ 最高6折算力折扣 | DreamField 主办
-
-</div>
+<!-- DREAMFIELD_README_HEADER_START -->
+<p align="center">
+<a href="https://www.dreamfield.top">
+<img src="https://www.dreamfield.top/dream-field/contest-readme/assets/dreamseed-readme-banner.png" alt="DreamSeed 种梦计划参赛作品" width="100%" />
+</a>
+</p>
+<!-- DREAMFIELD_README_HEADER_END -->
 
 ---
 
