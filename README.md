@@ -103,10 +103,11 @@ feishu-cardkit/
 ├── src/feishu_cardkit/
 │   ├── __init__.py            # 公共 API 导出
 │   ├── builder.py             # Card JSON 2.0 声明式构建器
-│   ├── controller.py          # StreamingCardController 状态机
+│   ├── controller.py          # StreamingCardController（简化独立版）
+│   ├── hermes_controller.py   # 🤝 Hermes 完整版控制器（2491行）
 │   ├── markdown.py            # Markdown 优化 & 表格解析
 │   ├── components.py          # 组件工厂（column_set, collapsible_panel 等）
-│   └── api.py                 # CardKit API 封装（创建/更新/流式/补丁）
+│   └── api.py                 # CardKit API 封装（创建/更新/流式/组件级CRUD）
 ├── docs/                      # 飞书卡片完整中文文档
 ├── examples/                  # 示例代码
 └── tests/                     # 单元测试
@@ -136,6 +137,51 @@ pip install -e ".[dev]"
 
 # 运行测试
 pytest
+```
+
+## 🤝 Hermes Agent 适配
+
+本项目提供 **完整版 Hermes 控制器**，可直接替代 Hermes Agent 内置的 `feishu_cardkit.py` 模块，无需修改任何业务逻辑。
+
+### 什么是 Hermes？
+
+[Hermes](https://github.com/nousresearch/hermes) 是一个开源 AI Agent 框架，本 SDK 的 `hermes_controller.py` 从 Hermes 的 `gateway/platforms/feishu_cardkit.py` 完整提取而来，保留了全部功能。
+
+### 迁移方式
+
+只需改一行 import：
+
+```python
+# 旧（Hermes 内置模块）
+from gateway.platforms.feishu_cardkit import StreamingCardController
+
+# 新（使用本 SDK）
+from feishu_cardkit.hermes_controller import StreamingCardController
+```
+
+### Hermes 完整版包含（独立 SDK 版不具备的）
+
+- **完整状态机**：`idle → creating → streaming → completed/aborted/terminated/creation_failed`
+- **finalize/abort**：带 `scoped_lock` 并发安全的卡片终结
+- **build_complete_card**：最终卡片渲染（工具折叠面板 + reasoning + 双语 footer + overflow 菜单）
+- **工具映射表**：`_TOOL_DISPLAY` 内置 30+ 工具的 emoji/标题/参数映射
+- **节流 & 批量刷新**：`FlushController` 风格的 `_throttled_update` + deferred flush + reflush
+- **消息不可用检测**：`mark_message_unavailable` + 30 分钟 TTL 缓存，跳过已撤回/删除的消息
+- **Reasoning 过滤**：`<think_phase>` 标签自动剥离 + 折叠显示
+- **多轮回复检测**：文本长度回缩自动识别为新一轮，`streaming_prefix` 累积
+- **静态降级回退**：CardKit 创建失败时自动回退到 `im.message.create` + `im.message.patch`
+
+### 依赖自动适配
+
+`hermes_controller.py` 中的 `gateway.status` 锁采用 `try/except` 自动降级：
+
+```python
+# Hermes 环境下自动启用并发锁
+try:
+    from gateway.status import acquire_scoped_lock, release_scoped_lock
+except ImportError:
+    # 独立使用时降级为 no-op
+    ...
 ```
 
 ## 📄 License
