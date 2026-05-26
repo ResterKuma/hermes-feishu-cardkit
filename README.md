@@ -39,6 +39,31 @@ Hermes 是一个开源 AI Agent 框架，原生支持 Telegram、Discord、Slack
 
 ## 📦 安装
 
+### 方式一：一键安装到 Hermes（推荐）
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ResterKuma/hermes-feishu-cardkit/main/install.sh | bash
+```
+
+安装后直接在 Hermes 中使用，无需改动任何代码：
+```python
+from gateway.platforms.feishu_cardkit import StreamingCardController
+```
+
+> 安装脚本会自动：查找 Hermes 路径 → 下载控制器 → 备份旧版本 → 放入 `gateway/platforms/`
+
+卸载：
+```bash
+curl -fsSL https://raw.githubusercontent.com/ResterKuma/hermes-feishu-cardkit/main/install.sh | bash -s -- --uninstall
+```
+
+手动指定路径：
+```bash
+bash install.sh --path /your/hermes-agent
+```
+
+### 方式二：pip 安装（独立使用）
+
 ```bash
 pip install feishu-cardkit
 ```
@@ -47,21 +72,22 @@ pip install feishu-cardkit
 
 ## 🚀 快速开始
 
-### 在 Hermes 中使用（替代内置模块）
+### Hermes 中使用
 
-只需改一行 import：
+一键安装后，直接 import 即可：
 
 ```python
-# 旧（Hermes 内置模块）
 from gateway.platforms.feishu_cardkit import StreamingCardController
 
-# 新（使用本库）
-from feishu_cardkit import StreamingCardController
+controller = StreamingCardController(
+    cfg={}, chat_id="oc_xxx", client=client, show_tool_use=True
+)
+await controller.ensure_card_created()
+await controller.update_content("你好世界！", is_partial=True)
+await controller.finalize(text="你好世界！")
 ```
 
-其余代码（finalize/abort/build_complete_card/fallback/工具映射等）无需任何改动。
-
-### 独立使用
+### 独立使用（pip 安装）
 
 ```python
 import asyncio
