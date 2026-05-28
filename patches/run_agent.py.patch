@@ -1,0 +1,24 @@
+diff --git a/run_agent.py b/run_agent.py
+index 182636d5a..cc667b0c2 100644
+--- a/run_agent.py
++++ b/run_agent.py
+@@ -410,13 +410,15 @@ REQUEST_COUNT_OPTIMIZATION_GUIDANCE = (
+     "# Request-count optimization\n"
+     "This session is optimized for the fewest possible model API requests. Do not make "
+     "extra API turns to gather nice-to-have context. Batch independent discovery into one "
+-    "tool response, prefer workspace_batch for multiple read/search/read-only terminal "
+-    "operations, and answer as soon as the available evidence is sufficient. Never call "
++    "tool response — issue multiple independent tool_calls in PARALLEL instead of calling "
++    "them one at a time. Use workspace_batch only when the model provider does NOT support "
++    "parallel tool_calls. Answer as soon as the available evidence is sufficient. Never call "
+     "a tool again with the same arguments unless its inputs changed.\n"
+     "\n"
+     "CRITICAL RULES:\n"
+-    "- Always use workspace_batch when you need 2+ independent reads, searches, or read-only "
+-    "terminal commands. Never call read_file and search_files separately in the same turn.\n"
++    "- When you need 2+ independent reads, searches, or read-only terminal commands, "
++    "issue them as parallel tool_calls in a single response (e.g. read_file + search_files + "
++    "terminal all in one go). Do NOT issue them one at a time.\n"
+     "- When a tool result includes `_request_cost_hint`, trust it — answer now unless a "
+     "specific critical fact is still missing.\n"
+     "- Prefer answering with 80% confidence over making another API call to verify. You can "
