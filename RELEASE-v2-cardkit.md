@@ -1,5 +1,15 @@
 # 🚀 CardKit v2 — 飞书卡片全面升级
 
+## 这是什么
+
+**feishu-cardkit** 是一个飞书流式卡片 SDK + Hermes Agent 集成方案，包含：
+
+- `src/feishu_cardkit/` — 核心 Python 包（卡片构建、streaming、渲染引擎）
+- `install.sh` — 一键安装脚本（安装核心包 + 给 Hermes Agent 打集成补丁）
+- `gateway/run.py` / `run_agent.py` 补丁 — Hermes Agent 调用 CardKit 所需的适配代码
+
+---
+
 ## 💬 新版卡片设计
 
 布局大幅精简，更清爽清晰：
@@ -25,7 +35,7 @@
 ## 📊 表格：column_set 横排布局 + 智能 fallback
 
 ### 旧问题
-Markdown 原生表格在移动端（窄屏）被截断，内容显示不全。
+Markdown 原生表格在飞书移动端（窄屏）被截断，内容显示不全。
 
 ### 新方案：column_set 横排布局
 
@@ -96,41 +106,78 @@ tables 元素 > 200 → 纯 markdown 表格回退（1 元素/表）⚠️
 
 - **update_card fallback** — `update_card` 失败时自动走 `patch_card_element` 作为保障，兼容 element nesting 300305 错误
 - **外层 column_set 包裹逻辑** — 内容 ≤20 个元素时自动包裹，避免混排导致渲染异常
-- **备份保护** — `feishu_cardkit.py.bak*` 自动生成，方便回滚
+- **备份保护** — 安装时自动备份旧版本
 
 ---
 
-## 📁 文件变更汇总
+## 📦 安装
+
+```bash
+# 一键安装到 Hermes Agent
+curl -fsSL https://raw.githubusercontent.com/ResterKuma/hermes-feishu-cardkit/main/install.sh | bash
+
+# 或指定 Hermes 路径
+curl -fsSL https://raw.githubusercontent.com/ResterKuma/hermes-feishu-cardkit/main/install.sh | bash -s -- --path /path/to/hermes-agent
+```
+
+**install.sh 会完成：**
+1. 自动查找 Hermes Agent 安装路径（通过 which / 常见路径 / pip）
+2. 下载最新版 `feishu_cardkit.py` 到 `gateway/platforms/`
+3. 备份旧版本（`*.bak.%Y%m%d%H%M%S`）
+4. 打集成补丁（`gateway/run.py` + `run_agent.py`）
+
+### 卸载
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ResterKuma/hermes-feishu-cardkit/main/install.sh | bash -s -- --uninstall
+```
+
+---
+
+## 📁 文件清单
+
+| 路径 | 说明 |
+|------|------|
+| `src/feishu_cardkit/__init__.py` | 包入口 |
+| `src/feishu_cardkit/hermes_controller.py` | **核心引擎** — StreamingCardController |
+| `install.sh` | 一键安装脚本（安装 + 打补丁） |
+| `docs/` | API 文档 |
+
+### hermes_controller.py 核心模块
+
+| 模块 | 行数 | 说明 |
+|------|------|------|
+| CardKit 构建器 | ~300 | Card JSON 2.0 构建、列表面板、column_set 表格 |
+| Streaming 状态机 | ~200 | CardPhase 四态管理、flushing 调度 |
+| 工具摘要渲染 | ~200 | 颜文字、summary 智能提取、截断控制 |
+| update / patch | ~100 | update_card + patch_card_element 双路径 |
+| build_complete_card | ~150 | finalize 卡片构建 |
+
+### 集成补丁
 
 | 文件 | 变更量 | 说明 |
 |------|--------|------|
-| `gateway/platforms/feishu_cardkit.py` | ±660 | 核心改动 |
-| `gateway/run.py` | ±173 | 卡片联动逻辑 |
-| `run_agent.py` | ±10 | 引导语优化 |
-
-### gateway/run.py 改动详情
-
-**1. 卡片元数据构建（L13126-L13144）**
-- 新增 `_cardkit_meta` 字典，统一构建 metadata
-- 加入 `reply_to_message_id` 以支持飞书原生引用回复
-- 移除 API 调用时多余的 `user_question` 参数
-
-**2. 最终清理路径安全增强（L14560-L14681）**
-- 新增 `_ensure_controller` 延迟创建逻辑：当 agent 在卡片创建完成前就返回纯文本回复时，可回追创建 controller
-- Empty State 判断从单一 `is not None` 改为分段校验：先检查 controller 是否存在，不存在则尝试创建，仍不存在才跳过
-- 其余逻辑（`finalize` 调用、卡片文本缓存、streaming 注销、日志）保持不变
-
-### run_agent.py 改动详情
-- 引导语/提示词中 `paralell` 拼写修正为 `parallel`
+| `gateway/run.py` | ±173 | 卡片元数据传递 + `_ensure_controller` 延迟创建 |
+| `run_agent.py` | ±10 | 引导语 `paralell` → `parallel` 修正 |
 
 ---
 
-## Git 历史
+## ⚙️ install.sh 集成补丁详情
 
-**Squash 记录：** 从 `ac5cb5c32` 到 `96fc2c531` 共 40 个 commits 合并为 1 个 commit。
+**gateway/run.py 补丁（L13126-L13144）：**
+- 新增 `_cardkit_meta` 字典构建，包含 `reply_to_message_id`（飞书原生引用回复支持）
+- 移除多余的 `user_question` 参数
 
-**分支：** `cardkit-v2`（基于 detached HEAD 创建，与 `main` 分支的工作流独立）
+**gateway/run.py 补丁（L14560-L14681）：**
+- 新增 `_ensure_controller` 延迟创建：agent 在卡片创建完成前返回纯文本时，可回追创建 controller
+- 分段校验（先查 controller 是否存在 → 不存在则创建 → 仍不存在才跳过）
+- 最终清理路径保护（finalize 调用、卡片文本缓存、streaming 注销）
 
-```bash
-69292353e feat(card): 飞书卡片全面升级 — column_set 表格 + 元素安全 + 工具摘要
-```
+---
+
+## 📜 版本历史
+
+| 版本 | 日期 | 说明 |
+|------|------|------|
+| v2.0 (cardkit-v2) | 2026-05-28 | column_set 表格、工具摘要增强、元素安全、集成补丁标准化 |
+| v0.1.0 | - | 初版（`main` 分支） |
