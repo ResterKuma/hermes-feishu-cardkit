@@ -1,0 +1,196 @@
+diff --git a/gateway/run.py b/gateway/run.py
+index bc9a80785..96e6803e4 100644
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -13126,13 +13126,18 @@ class GatewayRunner:
+                         buffer_threshold=10,  # Use smaller threshold for CardKit
+                         show_tool_use=True,
+                     )
++                    # 构建metadata：包含 reply_to_message_id 用于飞书原生引用
++                    _cardkit_meta = {}
++                    if _progress_thread_id:
++                        _cardkit_meta["thread_id"] = _progress_thread_id
++                    if event_message_id:
++                        _cardkit_meta["reply_to_message_id"] = event_message_id
+                     _stream_consumer = CardKitStreamConsumer(
+                         adapter=_adapter,
+                         chat_id=source.chat_id,
+                         config=_consumer_cfg,
+-                        metadata={"thread_id": _progress_thread_id} if _progress_thread_id else None,
++                        metadata=_cardkit_meta if _cardkit_meta else None,
+                         interrupt_prefix=_interrupt_prefix,
+-                        user_question=(message or ""),
+                     )
+                     if _want_stream_deltas:
+                         def _stream_delta_cb(text: str) -> None:
+@@ -14555,83 +14560,93 @@ class GatewayRunner:
+         # "🛠️ waiting for tool execution" and the gateway also sends a
+         # duplicate plain-text message.
+         _sc_ck = stream_consumer_holder[0]
+-        if _sc_ck and hasattr(_sc_ck, 'on_tool_use') and hasattr(_sc_ck, '_controller') and _sc_ck._controller is not None:
+-            _pending_text = _sc_ck.get_pending_final_text() if hasattr(_sc_ck, 'get_pending_final_text') else None
+-            # Use agent's final_response when _pending_text is empty.
+-            # When the agent makes tool calls, LLM text deltas stop before
+-            # the first tool invocation.  The consumer's _accumulated stays
+-            # empty, and the final reply text only exists in
+-            # response["final_response"].  Without this fallback, the card
+-            # shows only "已完成 · 耗时 ..." with no content.
+-            # Prefer agent's final_response over _pending_text.
+-            # When the model outputs text then makes tool calls, _pending_text
+-            # only contains the pre-tool text (e.g. "开干！🍑...").  The complete
+-            # reply is in response["final_response"].  Using the short _pending_text
+-            # here causes the finalize card to shrink from the streamed content.
+-            _completed_text = ""
+-            if isinstance(response, dict) and response.get("final_response"):
+-                _completed_text = response["final_response"]
+-            if not _completed_text:
+-                _completed_text = _pending_text or ""
+-            try:
+-                # Extract model and token info from response
+-                _finalize_model = response.get("model") if isinstance(response, dict) else None
+-                _finalize_tokens = None
+-                _finalize_ctx = None
+-                _finalize_iter = response.get("api_calls") if isinstance(response, dict) else None
+-                _finalize_hourly = None
+-                if isinstance(response, dict):
+-                    _t = {}
+-                    if response.get("input_tokens"):
+-                        _t["prompt"] = response["input_tokens"]
+-                    if response.get("output_tokens"):
+-                        _t["completion"] = response["output_tokens"]
+-                    _total = _t.get("prompt", 0) + _t.get("completion", 0)
+-                    if _total > 0:
+-                        _t["total"] = _total
+-                    if _t:
+-                        _finalize_tokens = _t
+-                    # Context usage
+-                    _ctx_total = response.get("context_length", 0)
+-                    _ctx_used = response.get("last_prompt_tokens", 0) or response.get("input_tokens", 0)
+-                    logger.info("[CardKit] finalize debug: context_length=%s, last_prompt_tokens=%s, input_tokens=%s",
+-                                _ctx_total, response.get("last_prompt_tokens"), response.get("input_tokens"))
+-                    if _ctx_total > 0 and _ctx_used > 0:
+-                        _finalize_ctx = {"used": _ctx_used, "total": _ctx_total}
+-                    # Hourly usage from rate limit state
+-                    if response.get("rate_limit_state"):
+-                        _rls = response["rate_limit_state"]
+-                        if hasattr(_rls, 'requests_hour') and _rls.requests_hour.limit > 0:
+-                            _finalize_hourly = {"used": _rls.requests_hour.used, "limit": _rls.requests_hour.limit}
+-                    logger.info("[CardKit] finalize debug: model=%s, tokens=%s, ctx=%s, iter=%s",
+-                                _finalize_model, _finalize_tokens, _finalize_ctx, _finalize_iter)
+-                await _sc_ck._controller.finalize(
+-                    completed_text=_completed_text,
+-                    reasoning_text=_sc_ck._controller._reasoning.accumulated_text or None,
+-                    reasoning_elapsed_ms=int((time.time() - _sc_ck._controller._reasoning.start_time) * 1000) if _sc_ck._controller._reasoning and _sc_ck._controller._reasoning.start_time else None,
+-                    model_name=_finalize_model,
+-                    token_usage=_finalize_tokens,
+-                    context_usage=_finalize_ctx,
+-                    iteration_count=_finalize_iter,
+-                    hourly_usage=_finalize_hourly,
+-                )
+-                # Mark as sent so the suppress logic below skips the duplicate send
+-                _sc_ck._final_response_sent = True
+-                # Cache card text so reply-to extraction works
+-                _card_msg_id = _sc_ck._controller.card_message_id if _sc_ck._controller else None
+-                _card_card_id = _sc_ck._controller._card_kit.card_id if _sc_ck._controller and _sc_ck._controller._card_kit else None
+-                if _card_msg_id and _completed_text:
+-                    _feishu_adapter = self.adapters.get(source.platform)
+-                    if _feishu_adapter and hasattr(_feishu_adapter, 'cache_card_text'):
+-                        _feishu_adapter.cache_card_text(_card_msg_id, _completed_text)
+-                # Unregister from active streaming tracking (card is now finalized)
+-                if _card_card_id:
+-                    _feishu_adapter = self.adapters.get(source.platform)
+-                    if _feishu_adapter and hasattr(_feishu_adapter, 'unregister_streaming_card'):
+-                        _feishu_adapter.unregister_streaming_card(_card_card_id)
+-                logger.info("[CardKit] Finalized via _run_agent cleanup path")
+-            except Exception as _e:
+-                logger.warning("[CardKit] Failed to finalize in _run_agent cleanup: %s", _e)
++        if _sc_ck and hasattr(_sc_ck, 'on_tool_use') and hasattr(_sc_ck, '_controller'):
++            if _sc_ck._controller is None:
++                # Plain-text reply: the agent returned before _ensure_controller
++                # finished creating the card.  Create it now so we can finalize.
++                logger.info("[CardKit] Controller not ready in finally-block, creating now")
++                try:
++                    if hasattr(_sc_ck, '_ensure_controller'):
++                        await _sc_ck._ensure_controller()
++                except Exception as _ec:
++                    logger.warning("[CardKit] Late controller creation failed: %s", _ec)
++            if _sc_ck._controller is not None:
++                _pending_text = _sc_ck.get_pending_final_text() if hasattr(_sc_ck, 'get_pending_final_text') else None
++                # Use agent's final_response when _pending_text is empty.
++                # When the agent makes tool calls, LLM text deltas stop before
++                # the first tool invocation.  The consumer's _accumulated stays
++                # empty, and the final reply text only exists in
++                # response["final_response"].  Without this fallback, the card
++                # shows only "已完成 · 耗时 ..." with no content.
++                # Prefer agent's final_response over _pending_text.
++                # When the model outputs text then makes tool calls, _pending_text
++                # only contains the pre-tool text (e.g. "开干！🍑...").  The complete
++                # reply is in response["final_response"].  Using the short _pending_text
++                # here causes the finalize card to shrink from the streamed content.
++                _completed_text = ""
++                if isinstance(response, dict) and response.get("final_response"):
++                    _completed_text = response["final_response"]
++                if not _completed_text:
++                    _completed_text = _pending_text or ""
++                try:
++                    # Extract model and token info from response
++                    _finalize_model = response.get("model") if isinstance(response, dict) else None
++                    _finalize_tokens = None
++                    _finalize_ctx = None
++                    _finalize_iter = response.get("api_calls") if isinstance(response, dict) else None
++                    _finalize_hourly = None
++                    if isinstance(response, dict):
++                        _t = {}
++                        if response.get("input_tokens"):
++                            _t["prompt"] = response["input_tokens"]
++                        if response.get("output_tokens"):
++                            _t["completion"] = response["output_tokens"]
++                        _total = _t.get("prompt", 0) + _t.get("completion", 0)
++                        if _total > 0:
++                            _t["total"] = _total
++                        if _t:
++                            _finalize_tokens = _t
++                        # Context usage
++                        _ctx_total = response.get("context_length", 0)
++                        _ctx_used = response.get("last_prompt_tokens", 0) or response.get("input_tokens", 0)
++                        logger.info("[CardKit] finalize debug: context_length=%s, last_prompt_tokens=%s, input_tokens=%s",
++                                    _ctx_total, response.get("last_prompt_tokens"), response.get("input_tokens"))
++                        if _ctx_total > 0 and _ctx_used > 0:
++                            _finalize_ctx = {"used": _ctx_used, "total": _ctx_total}
++                        # Hourly usage from rate limit state
++                        if response.get("rate_limit_state"):
++                            _rls = response["rate_limit_state"]
++                            if hasattr(_rls, 'requests_hour') and _rls.requests_hour.limit > 0:
++                                _finalize_hourly = {"used": _rls.requests_hour.used, "limit": _rls.requests_hour.limit}
++                        logger.info("[CardKit] finalize debug: model=%s, tokens=%s, ctx=%s, iter=%s",
++                                    _finalize_model, _finalize_tokens, _finalize_ctx, _finalize_iter)
++                    await _sc_ck._controller.finalize(
++                        completed_text=_completed_text,
++                        reasoning_text=_sc_ck._controller._reasoning.accumulated_text or None,
++                        reasoning_elapsed_ms=int((time.time() - _sc_ck._controller._reasoning.start_time) * 1000) if _sc_ck._controller._reasoning and _sc_ck._controller._reasoning.start_time else None,
++                        model_name=_finalize_model,
++                        token_usage=_finalize_tokens,
++                        context_usage=_finalize_ctx,
++                        iteration_count=_finalize_iter,
++                        hourly_usage=_finalize_hourly,
++                    )
++                    # Mark as sent so the suppress logic below skips the duplicate send
++                    _sc_ck._final_response_sent = True
++                    # Cache card text so reply-to extraction works
++                    _card_msg_id = _sc_ck._controller.card_message_id if _sc_ck._controller else None
++                    _card_card_id = _sc_ck._controller._card_kit.card_id if _sc_ck._controller and _sc_ck._controller._card_kit else None
++                    if _card_msg_id and _completed_text:
++                        _feishu_adapter = self.adapters.get(source.platform)
++                        if _feishu_adapter and hasattr(_feishu_adapter, 'cache_card_text'):
++                            _feishu_adapter.cache_card_text(_card_msg_id, _completed_text)
++                    # Unregister from active streaming tracking (card is now finalized)
++                    if _card_card_id:
++                        _feishu_adapter = self.adapters.get(source.platform)
++                        if _feishu_adapter and hasattr(_feishu_adapter, 'unregister_streaming_card'):
++                            _feishu_adapter.unregister_streaming_card(_card_card_id)
++                    logger.info("[CardKit] Finalized via _run_agent cleanup path")
++                except Exception as _e:
++                    logger.warning("[CardKit] Failed to finalize in _run_agent cleanup: %s", _e)
+ 
+         # If streaming already delivered the response, mark it so the
+         # caller's send() is skipped (avoiding duplicate messages).
