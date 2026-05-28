@@ -29,13 +29,15 @@ Hermes 是一个开源 AI Agent 框架，原生支持 Telegram、Discord、Slack
 - 🔄 **流式卡片** — AI 回复打字机效果，实时增量更新
 - 🏗️ **完整状态机** — `idle → creating → streaming → completed/aborted/terminated`
 - 🛠️ **工具调用折叠面板** — 30+ 工具的 emoji/标题/参数映射，按 Turn 分组展示
+- 📊 **表格 column_set 渲染** — Markdown 表格自动转为多列横排布局，完美适配移动端
+- 🧠 **智能工具摘要** — 按 key 名精准匹配参数摘要（patch 显示 `old → new`），截断 150 字符
 - 💭 **Reasoning 过滤** — `<think_phase>` 标签自动剥离 + 折叠显示
 - ⚡ **节流 & 批量刷新** — FlushController 风格的 throttle + deferred flush + reflush
-- 📊 **Markdown 表格** — 自动转为 `column_set` 多列布局，完美适配移动端
 - 🛡️ **消息不可用检测** — 30 分钟 TTL 缓存，跳过已撤回/删除的消息
 - 🔀 **多轮回复检测** — 文本长度回缩自动识别为新一轮
-- 🪂 **静态降级回退** — CardKit 创建失败时自动回退到 `im.message.create` + `im.message.patch`
-- 🔒 **并发安全** — `scoped_lock` 保护的 finalize/abort 操作
+- 🪂 **update_card fallback** — `update_card` 失败时自动走 `patch_card_element`
+- 🔒 **元素安全保护** — 自动估算卡片元素数，超 200 上限时回退纯 markdown 表格
+- 🔐 **并发安全** — `scoped_lock` 保护的 finalize/abort 操作
 
 ## 📦 安装
 
@@ -45,12 +47,16 @@ Hermes 是一个开源 AI Agent 框架，原生支持 Telegram、Discord、Slack
 curl -fsSL https://raw.githubusercontent.com/ResterKuma/hermes-feishu-cardkit/main/install.sh | bash
 ```
 
-安装后直接在 Hermes 中使用，无需改动任何代码：
+安装脚本会自动完成：
+1. 🔍 查找 Hermes Agent 安装路径
+2. 📥 下载最新 `feishu_cardkit.py` 到 `gateway/platforms/`
+3. 📦 备份旧版本（`*.bak.%Y%m%d%H%M%S`）
+4. 🩹 打集成补丁（`gateway/run.py` + `run_agent.py`）
+
+安装后直接在 Hermes 中使用：
 ```python
 from gateway.platforms.feishu_cardkit import StreamingCardController
 ```
-
-> 安装脚本会自动：查找 Hermes 路径 → 下载控制器 → 备份旧版本 → 放入 `gateway/platforms/`
 
 卸载：
 ```bash
@@ -142,14 +148,19 @@ message_id = await send_progress_card(
 feishu-cardkit/
 ├── src/feishu_cardkit/
 │   ├── __init__.py              # 公共 API 导出
-│   └── hermes_controller.py     # 核心模块（流式卡片控制器，完整状态机）
+│   └── hermes_controller.py     # 核心引擎（流式卡片控制器，完整状态机）
+├── patches/                     # Hermes Agent 集成补丁
+│   ├── run.py.patch             # gateway/run.py 卡片联动补丁
+│   └── run_agent.py.patch       # run_agent.py 引导语修正
 ├── docs/                        # 飞书卡片中文文档（Card JSON 2.0 / 组件 / 流式 / 回调）
 ├── examples/                    # 示例代码
-└── tests/                       # 单元测试
+├── tests/                       # 单元测试
+└── install.sh                   # 一键安装脚本（安装核心 + 打补丁）
 ```
 
-> 核心代码集中在单个模块 `hermes_controller.py`（~2500行），包含完整流式卡片生命周期：
-> API 调用、Markdown 优化、表格渲染、工具映射、节流控制、消息检测、降级回退。
+> 核心代码集中在单个模块 `hermes_controller.py`（~2500行），包含完整流式卡片生命周期：  
+> API 调用、Markdown 优化、表格 column_set 渲染、工具摘要映射、节流控制、元素安全、降级回退。  
+> 集成补丁见 `patches/` 目录，`install.sh` 自动应用。
 
 ## 🔧 依赖自动适配
 
