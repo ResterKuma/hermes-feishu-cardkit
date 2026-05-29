@@ -36,6 +36,8 @@ try:
         SettingsCardRequest,
         SettingsCardRequestBody,
     )
+    from lark_oapi.core import AccessTokenType, HttpMethod
+    from lark_oapi.core.model import BaseRequest
     LARK_AVAILABLE = True
 except ImportError:
     LARK_AVAILABLE = False
@@ -97,7 +99,7 @@ _TOOL_DISPLAY: Dict[str, Dict[str, Any]] = {
     "open":          {"emoji": "📄", "title": "Read",       "params": ["file_path", "path"]},
     "write":         {"emoji": "✏️",  "title": "Write",      "params": ["file_path", "path"]},
     "edit":          {"emoji": "✏️",  "title": "Edit",       "params": ["file_path", "path"]},
-    "patch":         {"emoji": "✏️",  "title": "Edit",       "params": ["path"]},
+    "patch":         {"emoji": "✏️",  "title": "Edit",       "params": ["old_string", "new_string", "path"]},
     "search_files":  {"emoji": "🔍", "title": "Search",     "params": ["pattern", "path"]},
     "search":        {"emoji": "🔍", "title": "Search",     "params": ["pattern", "query"]},
     # Web
@@ -175,7 +177,7 @@ def _normalize_tool_step(step: Any) -> Dict[str, Any]:
             val = params.get(pk)
             if val:
                 s = str(val)
-                summary = s[:80] + ("..." if len(s) > 80 else "")
+                summary = s[:150] + ("..." if len(s) > 150 else "")
                 break
 
     # Fallback: use step["title"] as summary when it differs from the display title
@@ -192,7 +194,7 @@ def _normalize_tool_step(step: Any) -> Dict[str, Any]:
         ]:
             m = re.search(pat, title, re.IGNORECASE)
             if m:
-                summary = m.group(1).strip()[:80]
+                summary = m.group(1).strip()[:150]
                 break
 
     # If we still have no summary but have params with common keys
@@ -201,7 +203,7 @@ def _normalize_tool_step(step: Any) -> Dict[str, Any]:
             val = params.get(k)
             if val:
                 s = str(val)
-                summary = s[:80] + ("..." if len(s) > 80 else "")
+                summary = s[:150] + ("..." if len(s) > 150 else "")
                 break
 
     return {
@@ -231,9 +233,20 @@ def _format_tool_summary_line(step: Dict[str, Any], index: int) -> str:
         status_icon = " ✓"
 
     if summary:
-        return f"{emoji} **{title}** `{_truncate(summary, 50)}`{status_icon}"
+        line = f"{emoji} **{title}** `{_truncate(summary, 150)}`{status_icon}"
     else:
-        return f"{emoji} **{title}**{status_icon}"
+        line = f"{emoji} **{title}**{status_icon}"
+
+    # Truncate to max 2 lines: keep first and last line, cut the middle
+    return _truncate_to_two_lines(line)
+
+
+def _truncate_to_two_lines(text: str) -> str:
+    """Truncate text to at most 2 lines by cutting the middle part."""
+    lines = text.split('\n')
+    if len(lines) <= 2:
+        return text
+    return lines[0] + '\n...\n' + lines[-1]
 
 
 def _truncate(text: str, max_len: int) -> str:
@@ -433,6 +446,7 @@ class StreamingCardController:
     reply_to_message_id: Optional[str] = None
     reply_in_thread: bool = False
     account_id: Optional[str] = None
+    user_question: str = ""
 
     # Internal state
     _phase: CardPhase = CardPhase.IDLE
@@ -449,6 +463,11 @@ class StreamingCardController:
     _last_flushed_reasoning_len: int = 0  # Track reasoning length to detect changes
     _panel_update_pending: bool = False   # Whether a background panel update is in flight
     _pending_flush_task: Optional[asyncio.Task] = None
+    _thinking_status_text: str = ""       # Current thinking status text on card
+    _thinking_face_idx: int = 0           # Rotating index for kawaii faces
+    _thinking_verb_idx: int = 0           # Rotating index for Chinese thinking verbs
+    _iteration_count: Optional[int] = None  # Current iteration count for quota display
+    _first_token_ms: Optional[int] = None   # First token timing for status bar
 
     @property
     def phase(self) -> CardPhase:
@@ -503,58 +522,174 @@ class StreamingCardController:
         """Compute elapsed time since dispatch start."""
         return int((time.time() - self._dispatch_start_time) * 1000)
 
+    def _build_quote_section(self) -> Dict[str, Any]:
+        """Build the user message quote section.
+        
+        Uses ReplyMessage official mechanism for the quote bar;
+        just displays the user's question as a blockquote.
+        """
+        if not self.user_question:
+            return {"tag": "markdown", "content": " "}
+        return {
+            "tag": "markdown",
+            "content": f"> {self.user_question}"
+        }
+
+    # Kawaii thinking faces (from display.py KawaiiSpinner.KAWAII_THINKING)
+    _THINKING_FACES = [
+        "(*￣︶￣)", "╰(*°▽°*)╯", "ヾ(◍°∇°◍)ﾉ", "(๑•̀ㅂ•́)و✧",
+        "(◍•ᴗ•◍)✧", "(*╹▽╹*)", "(•̀ᴗ•́)و", "(๑˃̵ᴗ˂̵)و",
+        "(๑¯◡¯๑)", "ヾ(✿❛▽❛)ノ",
+    ]
+
+    # Chinese thinking verbs
+    _THINKING_VERBS_CN = [
+        "思考中…", "分析中…", "计算中…", "推理中…", "处理中…",
+        "酝酿中…", "筹划中…", "检索中…", "琢磨中…", "探索中…",
+    ]
+
+    # Tool name → (icon, chinese_verb)
+    _TOOL_ACTION_MAP = {
+        "search_files": ("🔍", "搜索"),
+        "search": ("🔍", "搜索"),
+        "smart_search": ("🔎", "智能搜索"),
+        "read_file": ("📖", "阅读"),
+        "write_file": ("✏️", "写入"),
+        "edit": ("✏️", "编辑"),
+        "patch": ("🔧", "修补"),
+        "web_search": ("🌐", "搜索"),
+        "web_extract": ("🌐", "提取"),
+        "browser": ("🌐", "浏览"),
+        "terminal": ("⚡", "执行"),
+        "session_search": ("🔎", "检索记忆"),
+        "session": ("🔎", "检索"),
+        "skill_view": ("📚", "查阅"),
+        "skills_list": ("📚", "扫描"),
+        "skill_manage": ("📚", "管理"),
+        "todo": ("✅", "检查任务"),
+        "clarify": ("💬", "询问"),
+        "send_message": ("📤", "发送消息"),
+        "notify": ("📤", "通知"),
+        "mcp": ("🔌", "调用"),
+        "list_dir": ("📁", "列出目录"),
+        "check_submission": ("📋", "检查缺交"),
+        "locate": ("📍", "定位"),
+        "tree": ("🌳", "查看结构"),
+        "stats": ("📊", "统计"),
+    }
+
+    @staticmethod
+    def _match_tool_action(tool_name: str) -> tuple:
+        """Match a tool name to (icon, verb)."""
+        # Try exact match first
+        if tool_name in StreamingCardController._TOOL_ACTION_MAP:
+            return StreamingCardController._TOOL_ACTION_MAP[tool_name]
+        # Try suffix match (e.g. mcp_xxx → mcp)
+        for key, val in StreamingCardController._TOOL_ACTION_MAP.items():
+            if tool_name.startswith(key) or key.startswith(tool_name):
+                return val
+        return ("🛠️", "执行")
+
+    def _build_thinking_text(self) -> str:
+        """Build the thinking status text shown during streaming.
+        
+        Rotates through kawaii faces and Chinese verbs on each call.
+        When tools are present, shows the current tool action with context.
+        Always appends quota line at the bottom.
+        """
+        lines = []
+        
+        # Rotate face + verb
+        faces = self._THINKING_FACES
+        verbs = self._THINKING_VERBS_CN
+        face = faces[self._thinking_face_idx % len(faces)]
+        verb = verbs[self._thinking_verb_idx % len(verbs)]
+        self._thinking_face_idx += 1
+        self._thinking_verb_idx += 1
+        
+        lines.append(f"🧠 {face} {verb}")
+        
+        # Tool action line — one line max, truncated if too long
+        if self._text.tool_use_list:
+            # Get the latest tool
+            latest = self._text.tool_use_list[-1]
+            tool_name = latest.get("name", "") if isinstance(latest, dict) else str(latest)
+            icon, action_verb = self._match_tool_action(tool_name)
+            # Extract a brief summary from args
+            summary = latest.get("summary", "") if isinstance(latest, dict) else ""
+            if not summary:
+                args = latest.get("args", {}) if isinstance(latest, dict) else {}
+                if args:
+                    # For patch: show old_string → new_string trunc
+                    if "old_string" in args and "new_string" in args:
+                        old_s = str(args.get("old_string", ""))
+                        new_s = str(args.get("new_string", ""))
+                        o = old_s[:150] + ("..." if len(old_s) > 150 else "")
+                        n = new_s[:150] + ("..." if len(new_s) > 150 else "")
+                        summary = f"「{o}」→「{n}」"
+                    else:
+                        # Try known meaningful keys; skip mode/action keys
+                        for k in ("path", "file_path", "command", "cmd", "query",
+                                   "code", "url", "pattern", "message", "content",
+                                   "keyword", "old_string", "new_string",
+                                   "file_type", "question", "goal"):
+                            v = args.get(k)
+                            if v and isinstance(v, str):
+                                s = v[:150] + ("..." if len(v) > 150 else "")
+                                summary = s
+                                break
+            if summary:
+                tool_line = f"{icon} {action_verb}「{summary}」"
+            else:
+                tool_line = f"{icon} {action_verb}中…"
+            # Truncate to fit status line
+            if len(tool_line) > 150:
+                tool_line = tool_line[:147] + "…"
+            lines.append(tool_line)
+        
+        # Quota line
+        elapsed = self.compute_elapsed_ms()
+        elapsed_str = self._format_elapsed(elapsed) if elapsed else ""
+        iter_count = self._iteration_count
+        quota_parts = []
+        if iter_count is not None:
+            quota_parts.append(f"Iter {iter_count}")
+        if elapsed_str:
+            quota_parts.append(f"耗时 {elapsed_str}")
+        if quota_parts:
+            lines.append(f"💳 {' · '.join(quota_parts)}")
+        
+        return "\n".join(lines)
+
+    def _build_thinking_section(self, status_text: str = "") -> Dict[str, Any]:
+        """Build the thinking status section — shown during processing."""
+        if not status_text:
+            status_text = "🧠 (◉_◉) pondering..."
+        return {
+            "tag": "markdown",
+            "content": status_text,
+            "element_id": "thinking_status"
+        }
+
     def build_streaming_card(self, show_tool_use: bool = True) -> Dict[str, Any]:
         """Build the initial streaming card payload (CardKit 2.0 format).
 
-        Layout (matching WorkBuddy reference):
-          ┌─ 🛠️ 等待执行 ──────────┐  ← 外层折叠面板 (placeholder)
-          └──────────────────────────┘
-          [Streaming Content]    streaming text     (starts with placeholder)
-          [Loading icon]
+        Layout (new design):
+          ┌─ 💬 你说 ────────────────────┐  ← 引用用户消息
+          │   > 用户问题...              │
+          ├─ [Streaming Content] ─────┤  ← 流式正文
+          ├─ 🧠 (◉_◉) pondering... ──┤  ← 思考中状态 (含工具信息)
+          └──────────────────────────────┘
         """
         elements = []
 
-        # Combined collapsible panel placeholder — collapsed by default
-        # to keep main text area prominent.
-        if show_tool_use:
-            elements.append({
-                "tag": "collapsible_panel",
-                "expanded": False,
-                "header": {
-                    "title": {
-                        "tag": "plain_text",
-                        "content": "🛠️ 等待工具执行",
-                        "i18n_content": {
-                            "zh_cn": "🛠️ 等待工具执行",
-                            "en_us": "🛠️ Tool use pending"
-                        },
-                        "text_color": "grey",
-                        "text_size": "notation"
-                    },
-                    "vertical_align": "center",
-                    "icon": {
-                        "tag": "standard_icon",
-                        "token": "down-s...ined",
-                        "color": "grey",
-                        "size": "16px 16px"
-                    },
-                    "icon_position": "right",
-                },
-                "border": {"color": "grey", "corner_radius": "5px"},
-                "vertical_spacing": "4px",
-                "padding": "8px 8px 8px 8px",
-                "elements": [],
-                "element_id": "tool_use_panel"
-            })
+        # ① Quote section — user's original message
+        elements.append(self._build_quote_section())
 
-        # Divider between tool panel and content
-        if show_tool_use:
-            elements.append({
-                "tag": "hr",
-                "element_id": "divider_tool_content"
-            })
+        # Separator
+        elements.append({"tag": "hr", "element_id": "divider_qt_cont"})
 
-        # Streaming content element — starts with a thinking placeholder
+        # ② Streaming content element — starts with a thinking placeholder
         elements.append({
             "tag": "markdown",
             "content": " ",
@@ -564,17 +699,14 @@ class StreamingCardController:
             "element_id": STREAMING_ELEMENT_ID
         })
 
-        # Loading indicator
+        # ③ Thinking status section — shows KawaiiSpinner-style status
         elements.append({
-            "tag": "markdown",
-            "content": " ",
-            "icon": {
-                "tag": "custom_icon",
-                "img_key": "img_v3_02vb_496bec09-4b43-4773-ad6b-0cdd103cd2bg",
-                "size": "16px 16px"
-            },
-            "element_id": "loading_icon"
+            "tag": "hr",
+            "element_id": "divider_thinking"
         })
+        elements.append(self._build_thinking_section(
+            self._build_thinking_text()
+        ))
 
         return {
             "schema": "2.0",
@@ -590,23 +722,11 @@ class StreamingCardController:
                 "width_mode": "fill",
                 "locales": ["zh_cn", "en_us"],
                 "summary": {
-                    "content": "Processing...",
+                    "content": "处理中...",
                     "i18n_content": {"zh_cn": "处理中...", "en_us": "Processing..."}
                 }
             },
-            "header": {
-                "title": {
-                    "tag": "plain_text",
-                    "content": "⏳ 思考中...",
-                    "i18n_content": {"zh_cn": "⏳ 思考中...", "en_us": "⏳ Thinking..."}
-                },
-                "template": "blue",
-                "ud_icon": {
-                    "tag": "custom_icon",
-                    "img_key": "img_v3_02vb_496bec09-4b43-4773-ad6b-0cdd103cd2bg",
-                    "size": "16px 16px"
-                }
-            },
+            # No header (matches official bot style)
             "body": {
                 "direction": "vertical",
                 "padding": "12px",
@@ -619,8 +739,6 @@ class StreamingCardController:
     def build_complete_card(
         self,
         text: str,
-        reasoning_text: Optional[str] = None,
-        reasoning_elapsed_ms: Optional[int] = None,
         tool_use_steps: Optional[List] = None,
         tool_use_elapsed_ms: Optional[int] = None,
         show_tool_use: bool = True,
@@ -638,22 +756,19 @@ class StreamingCardController:
     ) -> Dict[str, Any]:
         """Build the final/complete card payload.
 
-        Layout (matching WorkBuddy reference):
-          ┌─ 🛠️ N个工具调用 · M个思考信息 ──────────────┐  ← 外层折叠面板
-          │ Turn 1:                                       │
-          │   💭 思考内容... (可折叠)                      │  ← 三级菜单
-          │   $ tool_call(...)                            │  ← 直接展示
-          │ Turn 2:                                       │
-          │   ...                                         │
-          └───────────────────────────────────────────────┘
-          [Main content]       markdown text
-          [Footer]             status info
+        Layout:
+          ① 💬 你说 (引用用户消息)
+          ② 🛠️ N步 (工具调用折叠面板)
+          ③ 正文 markdown + 表格
+          ④ status bar (精简)
         """
         elements = []
 
-        # ── Combined collapsible panel: turns with tool calls ──
-        # Reasoning is shown as a one-line hint (💭 让我xxx) inside each turn,
-        # NOT as a separate collapsible panel.
+        # ── ① Quote section ──
+        elements.append(self._build_quote_section())
+        elements.append({"tag": "hr", "element_id": "divider_quote_tool"})
+
+        # ── ② Combined collapsible panel: turns with tool calls ──
         has_turns_with_content = False
         panel_inner_elements = []
         total_tool_count = 0
@@ -721,13 +836,6 @@ class StreamingCardController:
                         "content": title_zh,
                     },
                     "vertical_align": "center",
-                    "icon": {
-                        "tag": "standard_icon",
-                        "token": "***",
-                        "color": "grey",
-                        "size": "16px 16px"
-                    },
-                    "icon_position": "right",
                 },
                 "border": {"color": "grey", "corner_radius": "5px"},
                 "vertical_spacing": "4px",
@@ -743,11 +851,45 @@ class StreamingCardController:
                 "element_id": "divider_tool_content"
             })
 
-        # Main content — wrap in outer column_set to avoid Feishu CardKit bug:
-        # mixing markdown + column_set at body top-level causes update_card to fail.
-        # Nesting in column_set > column works fine.
+        # ── ④ Main content ──
         content_elements: List[Dict[str, Any]] = []
+
+        # Body text + tables
         segments = self._split_text_and_tables(text)
+
+        # Estimate element count: pre-count all fixed elements, then decide
+        # whether tables can use column_set layout or must fallback to markdown.
+        # column_set table: (num_rows + 1) rows × (1 column_set + num_cols columns + num_cols markdowns)
+        # markdown table: 1 element per table
+        fixed_count = len(content_elements)  # reasoning panel + hr already added
+        # Quote section: 2 elements (quote + hr) — already in `elements`, not content_elements
+        # Tool panel + hr (if present): not in content_elements
+        table_cols_count = 0
+        table_segments = []
+        text_segments = []
+        for seg in segments:
+            if seg["type"] == "text":
+                text_segments.append(seg)
+                fixed_count += 1  # 1 markdown tag
+            else:
+                table_segments.append(seg)
+                if seg.get("headers"):
+                    nc = max(len(seg["headers"]), max((len(r) for r in seg.get("rows", [])), default=0))
+                else:
+                    nc = 0
+                table_cols_count += nc
+
+        # Estimate column_set table element count:
+        # Each row = (1 column_set + num_cols columns + num_cols markdowns)
+        total_est = fixed_count
+        for seg in table_segments:
+            nc = max(len(seg.get("headers", [])),
+                     max((len(r) for r in seg.get("rows", [])), default=0))
+            num_rows = len(seg.get("rows", [])) + 1  # +1 for header row
+            total_est += num_rows * (1 + nc + nc)  # column_set + columns + markdowns
+
+        use_column_set_for_tables = total_est <= 200
+
         for seg in segments:
             if seg["type"] == "text":
                 optimized = self._optimize_markdown(seg["content"])
@@ -756,41 +898,55 @@ class StreamingCardController:
                     "content": optimized
                 })
             elif seg["type"] in ("table",):
-                table_elements = self._parse_markdown_table(seg["headers"], seg["rows"])
+                table_elements = self._parse_markdown_table(
+                    seg["headers"], seg["rows"],
+                    use_column_set=use_column_set_for_tables
+                )
                 if table_elements:
                     content_elements.extend(table_elements)
 
-        # Wrap content + tool panel in outer column_set
-        outer_container = {
-            "tag": "column_set",
-            "flex_mode": "none",
-            "horizontal_spacing": "default",
-            "columns": [
-                {
+        # Wrap content in outer column_set to avoid mixing markdown + column_set
+        # at body.elements top level, which causes finalize update_card to fail.
+        if content_elements:
+            elements.append({
+                "tag": "column_set",
+                "flex_mode": "none",
+                "background_style": "default",
+                "horizontal_spacing": "default",
+                "element_id": "body_content",
+                "columns": [{
                     "tag": "column",
                     "width": "weighted",
                     "weight": 1,
                     "vertical_align": "top",
-                    "elements": [
-                        *elements,
-                        *content_elements,
-                    ]
-                }
-            ]
-        }
-        elements.clear()
-        elements.append(outer_container)
+                    "elements": content_elements
+                }]
+            })
 
-        # ── Footer: two-row markdown status bar ──
+        # ── ⑤ Thinking completed footnote ──
+        if is_error:
+            done_text = "❌ **出错**"
+        elif is_aborted:
+            done_text = "⏹ **已停止**"
+        else:
+            done_text = "✨ **已完成**"
+
+        elements.append({
+            "tag": "hr",
+            "element_id": "divider_footer_done"
+        })
+        elements.append({
+            "tag": "markdown",
+            "content": done_text,
+            "element_id": "thinking_status"
+        })
+
+        # ── ⑥ Footer: two-row markdown status bar ──
         elapsed_str = self._format_elapsed(elapsed_ms) if elapsed_ms else None
         if elapsed_str:
-            # Top row: status · model · iter · tokens
+            # Top row: model · iter · tokens
             top_parts_en = []
             top_parts_zh = []
-            status_en = "Error" if is_error else ("Stopped" if is_aborted else "Completed")
-            status_zh = "出错" if is_error else ("已停止" if is_aborted else "已完成")
-            top_parts_en.append(status_en)
-            top_parts_zh.append(status_zh)
             if model_name:
                 short_model = model_name.rsplit("/", 1)[-1] if "/" in model_name else model_name
                 top_parts_en.append(short_model)
@@ -878,36 +1034,6 @@ class StreamingCardController:
         # Summary
         summary_text = text.replace(r"[*_`#>\[\]()~]", "").strip()[:120]
 
-        # Header: color varies by status
-        if is_error:
-            header_template = "red"
-            header_title = "❌ 出错"
-            header_title_en = "❌ Error"
-        elif is_aborted:
-            header_template = "orange"
-            header_title = "⏹ 已停止"
-            header_title_en = "⏹ Stopped"
-        else:
-            header_template = "green"
-            header_title = "✅ 已完成"
-            header_title_en = "✅ Completed"
-
-        header: Dict[str, Any] = {
-            "title": {
-                "tag": "plain_text",
-                "content": header_title,
-                "i18n_content": {"zh_cn": header_title, "en_us": header_title_en}
-            },
-            "template": header_template,
-        }
-        if model_name:
-            short_model = model_name.rsplit("/", 1)[-1] if "/" in model_name else model_name
-            header["subtitle"] = {
-                "tag": "plain_text",
-                "content": short_model,
-                "text_color": "grey"
-            }
-
         return {
             "schema": "2.0",
             "config": {
@@ -918,7 +1044,7 @@ class StreamingCardController:
                 "locales": ["zh_cn", "en_us"],
                 "summary": {"content": summary_text} if summary_text else None
             },
-            "header": header,
+            # No header (matches official bot style)
             "body": {
                 "direction": "vertical",
                 "padding": "12px",
@@ -929,35 +1055,38 @@ class StreamingCardController:
         }
 
     @staticmethod
-    def _parse_markdown_table(headers: List[str], rows: List[List[str]]) -> Optional[List[Dict[str, Any]]]:
-        """Parse a markdown table into column_set elements for CardKit.
+    def _parse_markdown_table(headers: List[str], rows: List[List[str]],
+                              use_column_set: bool = True) -> Optional[List[Dict[str, Any]]]:
+        """Parse a markdown table into CardKit elements.
 
-        Each markdown table row becomes one column_set with columns matching
-        the header structure. This avoids mobile truncation issues with native
-        markdown tables.
+        When use_column_set=True: one column_set per row, one column per cell.
+        True aligned table on all clients, but uses more elements.
 
-        Returns a list of column_set elements, or None if parsing fails.
+        When use_column_set=False: single markdown element with standard
+        markdown table syntax.  Uses only 1 element per table.
 
-        Rules (from CardKit docs):
-        - Header and data rows use the SAME column structure (no merging)
-        - background_style: grey on header for visual distinction
-        - vertical_align: top for auto-wrapping long text
-        - 2 cols: bisect, 3+ cols: weighted with equal weights
+        Returns None if parsing fails.
         """
-        num_cols = len(headers)
+        num_cols = max(len(headers), max((len(r) for r in rows), default=0))
         if num_cols == 0:
             return None
 
-        # Use weighted for all tables, with proportional column weights
-        num_cols = max(len(headers), max((len(r) for r in rows), default=0))
+        # ── Fallback: pure markdown table (1 element) ──
+        if not use_column_set:
+            lines = []
+            lines.append("| " + " | ".join(h if h else " " for h in headers) + " |")
+            lines.append("| " + " | ".join("---" for _ in range(num_cols)) + " |")
+            for row in rows:
+                vals = [row[ci] if ci < len(row) else " " for ci in range(num_cols)]
+                lines.append("| " + " | ".join(vals) + " |")
+            table_md = "\n".join(lines)
+            return [{"tag": "markdown", "content": table_md, "text_size": "notation"}]
 
-        # Column weights: give more space to content columns
-        # (position 0: label, middle: content, last: description/details)
+        # ── column_set mode (n elements) ──
         col_weight = 1
-
         result: List[Dict[str, Any]] = []
 
-        # Header row (grey background for visual distinction)
+        # Header row (grey background)
         header_cols: List[Dict] = []
         for ci in range(num_cols):
             header_cols.append({
@@ -977,12 +1106,11 @@ class StreamingCardController:
             "flex_mode": "none",
             "background_style": "grey",
             "horizontal_spacing": "default",
-            "vertical_spacing": "2px",
             "element_id": f"th{id(headers) % 10000}",
             "columns": header_cols
         })
 
-        # Data rows (one column_set per row)
+        # Data rows
         for ri, row in enumerate(rows):
             data_cols: List[Dict] = []
             for ci in range(num_cols):
@@ -1004,8 +1132,7 @@ class StreamingCardController:
                 "flex_mode": "none",
                 "background_style": "default",
                 "horizontal_spacing": "default",
-                "vertical_spacing": "2px",
-            "element_id": f"tr{id(headers) % 10000}_{ri}",
+                "element_id": f"tr{id(headers) % 10000}_{ri}",
                 "columns": data_cols
             })
 
@@ -1168,7 +1295,8 @@ class StreamingCardController:
         can see what the agent is currently doing — e.g. "让我看看日志…",
         "找到原因了，是 xxx 导致的".
 
-        Falls back to empty string if no Chinese found.
+        Falls back to the full reasoning text if no Chinese found (so the
+        reasoning panel always shows up when reasoning exists).
         """
         if not text:
             return ""
@@ -1176,7 +1304,7 @@ class StreamingCardController:
         # Find all Chinese segments (sequences containing Chinese chars)
         segments = re.findall(r'[\u4e00-\u9fff][^\n]{0,200}', text)
         if not segments:
-            return ""
+            return text  # Fallback to full reasoning, no Chinese content
 
         # Take the last segment — it reflects current activity
         result = segments[-1].strip()
@@ -1418,115 +1546,10 @@ class StreamingCardController:
 
     def _build_streaming_card_with_tool_use(self) -> Dict[str, Any]:
         """
-        Build a full streaming card with tool use panel.
-
-        Layout:
-          ┌─ 🛠️ N 步 ──────────────────────┐  ← 外层折叠面板
-          │ Turn 1:                           │
-          │   💭 _让我看看日志…_              │  ← 一行提示，非折叠
-          │   $ tool_call(...)                │
-          │ Turn 2:                           │
-          │   ...                             │
-          └───────────────────────────────────┘
-          [Streaming Content]       streaming text
+        Build a streaming card — no tool use panel in streaming phase.
+        Tool info is shown via thinking_status line (颜文字行).
         """
-        turns = self._text.turns
-        steps = self._text.tool_use_list
-        tool_text = self._text.tool_use_text
-
-        # Build visible steps from flat list (legacy fallback when no turns)
-        visible_flat = self._build_tool_use_elements(steps) if steps else []
-        has_visible_turns = False
-
-        if turns:
-            for t in turns:
-                if any(not s.hidden for s in t.steps):
-                    has_visible_turns = True
-                    break
-
-        # If nothing visible at all, fall back to simple card
-        if not has_visible_turns and len(visible_flat) == 0 and not tool_text:
-            return self._build_simple_streaming_card()
-
         elements = []
-
-        # ── Combined collapsible panel: turns with tool calls ──
-        panel_inner_elements = []
-        total_tool_count = 0
-
-        if has_visible_turns:
-            for turn in turns:
-                visible_steps = [s for s in turn.steps if not s.hidden]
-
-                if not visible_steps:
-                    continue
-
-                turn_elements = []
-
-                # Per-turn tool calls (direct display)
-                for i, step in enumerate(visible_steps):
-                    total_tool_count += 1
-                    normalized = _normalize_tool_step({
-                        "name": step.name,
-                        "title": step.title,
-                        "summary": step.summary,
-                        "status": step.status,
-                    })
-                    line = _format_tool_summary_line(normalized, i)
-                    turn_elements.append({
-                        "tag": "div",
-                        "text": {
-                            "tag": "lark_md",
-                            "content": line
-                        }
-                    })
-
-                if turn_elements:
-                    panel_inner_elements.append({
-                        "tag": "div",
-                        "text": {
-                            "tag": "lark_md",
-                            "content": f"**Turn {turn.turn_number}:**"
-                        }
-                    })
-                    panel_inner_elements.extend(turn_elements)
-        else:
-            # Legacy fallback: flat step list
-            total_tool_count = len(visible_flat)
-            panel_inner_elements.extend(visible_flat)
-
-        # Build panel title — tool steps only
-        title_parts_zh = []
-        if total_tool_count > 0:
-            title_parts_zh.append(f"{total_tool_count} 步")
-        title_en = "🛠️ Executing · " + " · ".join(f"{total_tool_count} step{'s' if total_tool_count > 1 else ''}") if total_tool_count > 0 else "🛠️ Executing"
-        title_zh = "🛠️ 执行中 · " + " · ".join(title_parts_zh) if title_parts_zh else "🛠️ 执行中"
-
-        elements.append({
-            "tag": "collapsible_panel",
-            "expanded": False,
-            "header": {
-                "title": {
-                    "tag": "plain_text",
-                    "content": title_zh,
-                    "i18n_content": {"zh_cn": title_zh, "en_us": title_en},
-                    "text_color": "grey",
-                    "text_size": "notation"
-                },
-                "vertical_align": "center",
-                "icon": {
-                    "tag": "standard_icon",
-                    "token": "***",
-                    "color": "grey",
-                    "size": "16px 16px"
-                },
-                "icon_position": "right",
-            },
-            "border": {"color": "grey", "corner_radius": "5px"},
-            "vertical_spacing": "4px",
-            "padding": "8px 8px 8px 8px",
-            "elements": panel_inner_elements
-        })
 
         # ── Streaming content element ──
         streaming_text = self._text.accumulated_text or ""
@@ -1557,19 +1580,6 @@ class StreamingCardController:
                     "print_strategy": "fast"
                 },
                 "locales": ["zh_cn", "en_us"]
-            },
-            "header": {
-                "title": {
-                    "tag": "plain_text",
-                    "content": "⏳ 思考中...",
-                    "i18n_content": {"zh_cn": "⏳ 思考中...", "en_us": "⏳ Thinking..."}
-                },
-                "template": "blue",
-                "ud_icon": {
-                    "tag": "custom_icon",
-                    "img_key": "img_v3_02vb_496bec09-4b43-4773-ad6b-0cdd103cd2bg",
-                    "size": "16px 16px"
-                }
             },
             "body": {
                 "elements": elements
@@ -1612,19 +1622,6 @@ class StreamingCardController:
                     "print_strategy": "fast"
                 },
                 "locales": ["zh_cn", "en_us"]
-            },
-            "header": {
-                "title": {
-                    "tag": "plain_text",
-                    "content": "⏳ 思考中...",
-                    "i18n_content": {"zh_cn": "⏳ 思考中...", "en_us": "⏳ Thinking..."}
-                },
-                "template": "blue",
-                "ud_icon": {
-                    "tag": "custom_icon",
-                    "img_key": "img_v3_02vb_496bec09-4b43-4773-ad6b-0cdd103cd2bg",
-                    "size": "16px 16px"
-                }
             },
             "body": {
                 "elements": elements
@@ -1697,20 +1694,23 @@ class StreamingCardController:
             })
 
             if self.reply_to_message_id:
+                logger.info("[CardKit] send_card_message replying to message_id=%s", self.reply_to_message_id)
+                # 使用 ReplyMessage REST API 实现引用条效果
+                # POST /open-apis/im/v1/messages/{message_id}/reply
+                # reply_to_message_id 天然实现"引用回复"UI
                 request = (
-                    ReplyMessageRequest.builder()
-                    .message_id(self.reply_to_message_id)
-                    .request_body(
-                        ReplyMessageRequestBody.builder()
-                        .content(content_payload)
-                        .msg_type("interactive")
-                        .reply_in_thread(self.reply_in_thread)
-                        .build()
-                    )
+                    BaseRequest.builder()
+                    .http_method(HttpMethod.POST)
+                    .uri(f"/open-apis/im/v1/messages/{self.reply_to_message_id}/reply")
+                    .body({
+                        "content": content_payload,
+                        "msg_type": "interactive",
+                    })
+                    .token_types({AccessTokenType.TENANT})
                     .build()
                 )
                 response = await asyncio.wait_for(
-                    asyncio.to_thread(self.client.im.v1.message.reply, request),
+                    asyncio.to_thread(self.client.request, request),
                     timeout=10.0
                 )
             else:
@@ -1731,12 +1731,32 @@ class StreamingCardController:
                     timeout=10.0
                 )
 
-            if hasattr(response, 'data') and response.data:
+            # 兼容两种 response 格式：
+            # SDK 方法 (CreateMessage/ReplyMessage) → response.data.message_id
+            # BaseRequest (REST API)               → response.raw.content (JSON)
+            raw_content = getattr(getattr(response, "raw", None), "content", None)
+            if raw_content:
+                # BaseRequest 路径：从 raw.content JSON 解析
+                payload = json.loads(raw_content)
+                if payload.get("code") == 0:
+                    msg_info = payload.get("data", {})
+                    result = {
+                        'message_id': msg_info.get('message_id', ''),
+                        'chat_id': msg_info.get('chat_id', ''),
+                    }
+                    logger.info("[CardKit] sent card message (REST): %s", result['message_id'])
+                    return result
+                else:
+                    logger.warning("[CardKit] send_card_message REST failed: code=%s, msg=%s",
+                                   payload.get("code"), payload.get("msg"))
+                    check_api_error_unavailable(self.reply_to_message_id, payload, "send_card_message")
+            elif hasattr(response, 'data') and response.data:
+                # SDK 路径
                 result = {
                     'message_id': getattr(response.data, 'message_id', ''),
                     'chat_id': getattr(response.data, 'chat_id', '')
                 }
-                logger.info("[CardKit] sent card message: %s", result['message_id'])
+                logger.info("[CardKit] sent card message (SDK): %s", result['message_id'])
                 return result
 
         except asyncio.TimeoutError:
@@ -2217,43 +2237,58 @@ class StreamingCardController:
             logger.info("[CardKit] _do_flush: stream_content, text_len=%d, success=%s",
                         len(display_text), text_success)
 
-        # --- 2. Panel update via patch_card_element (incremental) ---
-        current_tool_count = len(self._text.tool_use_list) if self._text.tool_use_list else 0
-        tool_count_changed = current_tool_count != self._last_flushed_tool_count
+        # --- 2. Panel update via patch_card_element (only after finalize) ---
+        # Streaming phase has no tool panel; tool info is shown in thinking_status line.
+        if self.phase == CardPhase.COMPLETED:
+            current_tool_count = len(self._text.tool_use_list) if self._text.tool_use_list else 0
+            tool_count_changed = current_tool_count != self._last_flushed_tool_count
 
-        current_reasoning_len = len(self._reasoning.accumulated_text) if self._reasoning.accumulated_text else 0
-        reasoning_changed = current_reasoning_len != self._last_flushed_reasoning_len
+            current_reasoning_len = len(self._reasoning.accumulated_text) if self._reasoning.accumulated_text else 0
+            reasoning_changed = current_reasoning_len != self._last_flushed_reasoning_len
 
-        if (tool_count_changed or reasoning_changed) and self.show_tool_use:
-            partial = self._build_panel_partial()
-            if partial:
-                self._card_kit.sequence += 1
-                patch_success = await self.patch_card_element(
-                    self._card_kit.card_id,
-                    "tool_use_panel",
-                    partial,
-                    self._card_kit.sequence
-                )
-                if patch_success:
-                    self._last_flushed_tool_count = current_tool_count
-                    self._last_flushed_reasoning_len = current_reasoning_len
-                else:
-                    # Fallback: if patch fails (e.g. element_id not recognized),
-                    # try full update_card as before
-                    logger.warning("[CardKit] _do_flush: patch_card_element failed, falling back to update_card")
+            if (tool_count_changed or reasoning_changed) and self.show_tool_use:
+                partial = self._build_panel_partial()
+                if partial:
                     self._card_kit.sequence += 1
-                    card = self._build_streaming_card_with_tool_use()
-                    card_success = await self.update_card(
+                    patch_success = await self.patch_card_element(
                         self._card_kit.card_id,
-                        card,
+                        "tool_use_panel",
+                        partial,
                         self._card_kit.sequence
                     )
-                    if card_success:
-                        self._text.last_flushed_text = display_text
+                    if patch_success:
                         self._last_flushed_tool_count = current_tool_count
                         self._last_flushed_reasoning_len = current_reasoning_len
-                logger.info("[CardKit] _do_flush: panel update, tools=%d, reasoning=%d",
-                            current_tool_count, current_reasoning_len)
+                    else:
+                        # Fallback: if patch fails (e.g. element_id not recognized),
+                        # try full update_card as before
+                        logger.warning("[CardKit] _do_flush: patch_card_element failed, falling back to update_card")
+                        self._card_kit.sequence += 1
+                        card = self._build_streaming_card_with_tool_use()
+                        card_success = await self.update_card(
+                            self._card_kit.card_id,
+                            card,
+                            self._card_kit.sequence
+                        )
+                        if card_success:
+                            self._text.last_flushed_text = display_text
+                            self._last_flushed_tool_count = current_tool_count
+                            self._last_flushed_reasoning_len = current_reasoning_len
+                    logger.info("[CardKit] _do_flush: panel update, tools=%d, reasoning=%d",
+                                current_tool_count, current_reasoning_len)
+
+        # --- 3. Thinking status update (streaming phase) ---
+        new_thinking = self._build_thinking_text()
+        if new_thinking != self._thinking_status_text:
+            self._card_kit.sequence += 1
+            thinking_success = await self.patch_card_element(
+                self._card_kit.card_id,
+                "thinking_status",
+                {"content": new_thinking},
+                self._card_kit.sequence
+            )
+            if thinking_success:
+                self._thinking_status_text = new_thinking
 
     async def _do_panel_update(self, display_text: str) -> None:
         """Legacy panel update — no longer used.
@@ -2327,24 +2362,11 @@ class StreamingCardController:
                     if not _normalize_tool_step(s).get("hidden", False)
                 ]
 
-            # Resolve final text and reasoning
-            _final_text = completed_text or self._text.accumulated_text
-            _final_reasoning = reasoning_text or self._reasoning.accumulated_text
-            # Filter reasoning: remove pure English thinking, keep Chinese + code
-            _final_reasoning = self._filter_reasoning(_final_reasoning) if _final_reasoning else None
-
-            # Smart merge: disabled — reasoning should always stay in its own
-            # collapsible panel, never merged into the main text body.
-            # (Previously this merged reasoning into body when body was short,
-            #  but users found it confusing — reasoning belongs in its panel.)
+            # Resolve final text: use accumulated streaming content
+            _final_text = self._text.accumulated_text or ""
 
             final_card = self.build_complete_card(
                 text=_final_text,
-                reasoning_text=_final_reasoning,
-                reasoning_elapsed_ms=reasoning_elapsed_ms or (
-                    int((time.time() - self._reasoning.start_time) * 1000)
-                    if self._reasoning.start_time else None
-                ),
                 tool_use_steps=_tool_use_steps,
                 tool_use_elapsed_ms=tool_use_elapsed_ms,
                 show_tool_use=self.show_tool_use,
@@ -2362,6 +2384,22 @@ class StreamingCardController:
 
             update_ok = await self.update_card(self._card_kit.card_id, final_card, self._card_kit.sequence)
             logger.info("[CardKit] finalize: update_card -> %s", update_ok)
+
+            if not update_ok:
+                # Fallback: update_card failed (e.g. code=300305 element exceeds limit).
+                # Card already has stream_content element from streaming phase.
+                # Just patch its text content to final text so card shows complete answer.
+                _fallback_text = _final_text
+                if not is_error and not is_aborted:
+                    _fallback_text += "\n\n---\n✨ **已完成**"
+                logger.info("[CardKit] finalize: update_card failed, fallback to patch_card_element")
+                self._card_kit.sequence += 1
+                await self.patch_card_element(
+                    self._card_kit.card_id,
+                    STREAMING_ELEMENT_ID,
+                    {"content": _fallback_text},
+                    self._card_kit.sequence
+                )
 
         if self.on_card_finalized:
             await self.on_card_finalized(self._card_kit.message_id, self._card_kit.card_id)
@@ -2412,7 +2450,8 @@ async def create_streaming_card(
     chat_id: str,
     show_tool_use: bool = True,
     reply_to_message_id: Optional[str] = None,
-    reply_in_thread: bool = False
+    reply_in_thread: bool = False,
+    user_question: str = "",
 ) -> StreamingCardController:
     """
     Create and initialize a streaming card.
@@ -2425,7 +2464,8 @@ async def create_streaming_card(
         client=client,
         show_tool_use=show_tool_use,
         reply_to_message_id=reply_to_message_id,
-        reply_in_thread=reply_in_thread
+        reply_in_thread=reply_in_thread,
+        user_question=user_question,
     )
 
     await controller.ensure_card_created()

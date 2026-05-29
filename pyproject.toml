@@ -4,17 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "feishu-cardkit"
-version = "0.1.0"
-description = "飞书 CardKit SDK — 流式卡片、JSON 2.0 构建、Markdown 表格渲染，一站式搞定"
+version = "2.0.0"
+description = "Hermes Agent 飞书 CardKit 流式卡片专用插件"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
 authors = [
     {name = "ResterKuma (YuZiXuan)", email = "rester@users.noreply.github.com"},
 ]
-keywords = ["feishu", "lark", "cardkit", "streaming", "card", "chatbot"]
+keywords = ["feishu", "lark", "cardkit", "streaming", "hermes", "plugin"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
